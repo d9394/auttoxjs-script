@@ -1,86 +1,161 @@
-// 导入模块
 "ui";
-const fs = files;
-//const http = require("http");
 
-// 本地文件路径
-const LOCAL_VERSION_PATH = "/sdcard/脚本/version.txt";
+const fs = files;
 const LOCAL_SCRIPT_PATH = "/sdcard/脚本/taojinbi.js";
 
-// 远程文件 URL
-const SERVER_VERSION_URL = "http://192.168.1.1/server-version.txt";
-const SERVER_SCRIPT_URL = "http://192.168.1.1/taojinbi.js";
+// 解析本地脚本，获得 URL & 本地版本号
+function readLocalScriptInfo() {
+    if (!fs.exists(LOCAL_SCRIPT_PATH)) return null;
 
-//序列化数据到本地
-//var storage = storages.create("d9394");
+    let lines = fs.read(LOCAL_SCRIPT_PATH).split("\n");
 
-// 启动逻辑
-function main() {
-    let localVersion = "0.1"; // 默认本地版本为0.1
+    let url = "";
+    let ver = "";
 
-    // 检查本地版本文件
-    if (fs.exists(LOCAL_VERSION_PATH)) {
-        localVersion = fs.read(LOCAL_VERSION_PATH).trim(); // 读取本地版本号
-        console.log("本地版本:", localVersion);
-    } else {
-        console.log("本地版本文件不存在");
+    for (let i = 0; i < 3 && i < lines.length; i++) {
+        let line = lines[i].trim();
+
+        if (line.startsWith("var taojinbi_source")) {
+            let m = line.match(/"(.*?)"/);
+            if (m) url = m[1];
+        }
+
+        if (line.startsWith("var taojinbi_version")) {
+            let m = line.match(/"(.*?)"/);
+            if (m) ver = m[1];
+        }
     }
 
-    // 检查远程版本
-    console.log("检查远程版本...");
-    http.get(SERVER_VERSION_URL, {}, function (res) {
-        if (res.statusCode === 200) {
-            let serverVersion = res.body.string().trim();
-            console.log("远程版本:", serverVersion);
+    return { url, ver };
+}
 
-            if (compareVersion(localVersion, serverVersion)) {
-                console.log("发现新版本，开始下载...");
-                downloadAndSaveScript(serverVersion);
-            } else {
-                console.log("本地版本已是最新，无需更新");
-            }
-        } else {
-            console.error("获取远程版本失败，状态码:", res.statusCode);
+// 从 URL 替换得到 server-version.txt 地址
+function getServerVersionURL(jsURL) {
+    return jsURL.replace("taojinbi.js", "server-version.txt");
+}
+
+// 版本比较（主版本.小版本）
+function versionIsNew(local, server) {
+    if (!local || !server) return false;
+
+    let a = local.replace("v", "").split(".").map(Number);
+    let b = server.replace("v", "").split(".").map(Number);
+
+    let majorA = a[0] || 0, minorA = a[1] || 0;
+    let majorB = b[0] || 0, minorB = b[1] || 0;
+
+    if (majorB > majorA) return true;
+    if (majorB < majorA) return false;
+
+    return minorB > minorA;
+}
+
+// 下载脚本
+function downloadScript(url, newVer) {
+    toast("正在下载脚本……");
+
+    http.get(url, {
+        timeout: 8000,
+        rejectUnauthorized: false   // 忽略 https 证书错误
+    }, function (res) {
+        if (!res || res.statusCode !== 200) {
+            toast("下载失败");
+            return;
+        }
+
+        fs.write(LOCAL_SCRIPT_PATH, res.body.string());
+        toast("下载完成，版本：" + newVer);
+
+        // ★★ 下载完成后重新读取本地文件并更新 UI ★★
+        let info = readLocalScriptInfo();
+        if (info) {
+            ui.run(function () {
+                ui.ipt_url.setText(info.url);
+                ui.ipt_local_ver.setText(info.ver);
+            });
         }
     });
+}
 
-    // 检查本地脚本
-    if (fs.exists(LOCAL_SCRIPT_PATH)) {
-        console.log("本地脚本存在，尝试加载...");
-        try {
-            engines.execScriptFile(LOCAL_SCRIPT_PATH); // 加载本地脚本
-            console.log("本地脚本加载完成");
-        } catch (e) {
-            console.error("加载本地脚本失败:", e);
+// ---------------- UI ----------------
+ui.layout(
+    <vertical padding="16">
+        <scroll>
+            <vertical>
+                <text text="服务器下载链接：" textSize="16sp"/>
+                <input id="ipt_url" textSize="16sp"/>
+
+                <text text="本地版本号：" textSize="16sp" marginTop="12"/>
+                <input id="ipt_local_ver" textSize="16sp"/>
+
+                <text text="服务器版本号：" textSize="16sp" marginTop="12"/>
+                <input id="ipt_server_ver" textSize="16sp" enabled="false"/>
+
+                <checkbox id="ck_force" text="强制更新" marginTop="16"/>
+            </vertical>
+        </scroll>
+
+        <horizontal marginTop="20">
+            <button id="btn_run" text="执行" w="0" layout_weight="1"/>
+            <button id="btn_exit" text="退出" w="0" layout_weight="1" marginLeft="12"/>
+        </horizontal>
+    </vertical>
+);
+
+// 初始化 UI
+let info = readLocalScriptInfo();
+if (info) {
+    ui.ipt_url.setText(info.url);
+    ui.ipt_local_ver.setText(info.ver);
+
+    // 获取服务器版本号
+    let verURL = getServerVersionURL(info.url);
+
+    http.get(verURL, {
+        timeout: 5000,
+        rejectUnauthorized: false
+    }, function (res) {
+        if (res && res.statusCode === 200) {
+            let serverVer = res.body.string().trim();
+            ui.run(() => ui.ipt_server_ver.setText(serverVer));
+        } else {
+            toast("读取服务器版本失败");
         }
-    } else {
-        console.log("本地脚本不存在");
+    });
+} else {
+    toast("本地脚本不存在，无法初始化 UI");
+}
+
+// ---------------- 按钮事件 ----------------
+
+// 执行更新判断
+ui.btn_run.click(function () {
+    let url = ui.ipt_url.text();
+    let localVer = ui.ipt_local_ver.text().trim();
+    let serverVer = ui.ipt_server_ver.text().trim();
+    let force = ui.ck_force.checked;
+
+    if (!url || !localVer || !serverVer) {
+        toast("信息不完整");
+        return;
     }
-}
 
-// 比较版本号 (返回 true 表示远程版本较新)
-function compareVersion(local, server) {
-    return local < server;
-}
+    if (force) {
+        toast("强制更新已启用");
+        downloadScript(url, serverVer);
+        return;
+    }
 
-// 下载远程脚本并保存
-function downloadAndSaveScript(newVersion) {
-    http.get(SERVER_SCRIPT_URL, {}, function (res) {
-        if (res.statusCode === 200) {
-            let scriptContent = res.body.string();
-            fs.write(LOCAL_SCRIPT_PATH, scriptContent); // 保存脚本到本地
-            fs.write(LOCAL_VERSION_PATH, newVersion); // 更新版本号到本地
-            console.log("新版本脚本下载完成，已保存到本地");
-            //storage.remove("list_ck")
-            //storage.remove("list_txt")
-            //console.log("已清空本地关键字");
-            exit(); // 下载完成后退出
-        } else {
-            console.error("下载远程脚本失败，状态码:", res.statusCode);
-        }
-    });
-}
+    if (versionIsNew(localVer, serverVer)) {
+        toast("发现新版本：" + serverVer);
+        downloadScript(url, serverVer);
+    } else {
+        toast("当前为最新版本，无需更新");
+    }
+});
 
-// 启动主逻辑
-main();
-exit();
+// 退出
+ui.btn_exit.click(function () {
+    toast("退出程序");
+    exit();
+});
